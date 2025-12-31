@@ -169,3 +169,85 @@ def upload_file_to_ftp(local_path: str,
         except Exception:
             pass
         return False, f"Erro inesperado: {e}"
+    
+    
+def list_remote_files(host: str,
+                      username: str,
+                      password: str,
+                      remote_dir: str = ".",
+                      port: int = 21,
+                      secure: bool = False,
+                      timeout: int = 30,
+                      passive: bool = True):
+    """
+    Lista arquivos no diretório remoto (não recursivo).
+    Retorna (True, set(filenames)) em sucesso, ou (False, mensagem) em falha.
+    Filenames são apenas os nomes (ex: 'empresa1_20251231_170608.zip').
+    """
+    try:
+        if secure:
+            ftp = ftplib.FTP_TLS(timeout=timeout)
+        else:
+            ftp = ftplib.FTP(timeout=timeout)
+
+        ftp.connect(host, port, timeout=timeout)
+        ftp.login(username, password)
+        ftp.set_pasv(passive)
+
+        if secure and isinstance(ftp, ftplib.FTP_TLS):
+            try:
+                ftp.prot_p()
+            except Exception:
+                pass
+
+        # garantir que entramos no remote_dir (reusar a mesma lógica de criação/entrada)
+        try:
+            _ensure_remote_dirs(ftp, remote_dir)
+        except Exception:
+            # tentar partir da raiz
+            try:
+                ftp.cwd("/")
+                _ensure_remote_dirs(ftp, remote_dir)
+            except Exception as e:
+                try:
+                    ftp.quit()
+                except Exception:
+                    pass
+                return False, f"Não foi possível entrar em remote_dir '{remote_dir}': {e}"
+
+        # tentar listar (nlst é geralmente suportado)
+        try:
+            names = ftp.nlst()
+        except ftplib.error_perm as e_perm:
+            # servidor pode devolver erro 550 se diretório vazio; tratar como vazio
+            if str(e_perm).startswith("550"):
+                names = []
+            else:
+                ftp.quit()
+                return False, f"Erro ao listar arquivos (nlst): {e_perm}"
+        except Exception as e:
+            ftp.quit()
+            return False, f"Erro ao listar arquivos: {e}"
+
+        # finalizar conexão
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+
+        # filtrar para apenas nomes (nem todos servidores devolvem caminho completo)
+        basenames = {os.path.basename(n) for n in names if n}
+        return True, basenames
+
+    except ftplib.all_errors as e:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+        return False, f"Erro FTP ao listar: {e}"
+    except Exception as e:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+        return False, f"Erro inesperado ao listar remoto: {e}"

@@ -6,9 +6,10 @@ import sys
 import time
 import subprocess
 import configparser
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import logging
 import zipfile
+from utils import sync_local_zips_to_ftp
 
 # importa o módulo de upload (arquivo ftp_transfer.py ao lado)
 import ftp_transfer
@@ -316,6 +317,7 @@ def main(ini_path):
     # Carregar configuração FTP (opcional). Se host vazio => não faz upload.
     ftp_host = config["DEFAULT"].get("ftp_server", "").strip()
     ftp_config = None
+    ftp_sync_interval_minutes = int(config["DEFAULT"].get("ftp_sync_interval_minutes", "60"))
     if ftp_host:
         ftp_config = {
             "host": ftp_host,
@@ -325,7 +327,8 @@ def main(ini_path):
             "remote_dir": config["DEFAULT"].get("ftp_remote_dir", "."),
             "secure": config["DEFAULT"].getboolean("ftp_secure", False),
             "timeout": int(config["DEFAULT"].get("ftp_timeout", "30")),
-            "passive": config["DEFAULT"].getboolean("ftp_passive", True)
+            "passive": config["DEFAULT"].getboolean("ftp_passive", True),
+            
         }
 
     dbs = []
@@ -357,7 +360,8 @@ def main(ini_path):
             "cfg": db,
             "folder": folder,
             # last_run[HH:MM] = date() quando executado
-            "last_run": {t: None for t in db['times']}
+            "last_run": {t: None for t in db['times']},
+            "last_sync": None
         }
 
     logging.info("Agendador iniciado. Entradas:")
@@ -405,6 +409,27 @@ def main(ini_path):
                             info['last_run'][scheduled] = today
                         else:
                             logging.warning(f"Backup para {name} em {scheduled} falhou. Não marcar como executado; tentará novamente se aplicável.")
+
+                # ler interval do config (só uma vez no load); suponha ftp_sync_interval_minutes int
+                interval = timedelta(minutes=ftp_sync_interval_minutes)
+    
+                now_dt = datetime.now()
+                last = info.get("last_sync")
+                if ftp_config and ftp_config.get("host"):
+                    do_sync = False
+                    if last is None:
+                        do_sync = True
+                    else:
+                        if (now_dt - last) >= interval:
+                            do_sync = True
+    
+                    if do_sync:
+                        logging.info(f"Iniciando sync FTP para {name} (local->{ftp_config.get('remote_dir')}/{name})")
+                        uploaded, failed, msg = sync_local_zips_to_ftp(info['folder'], name, ftp_config)
+                        logging.info(f"Sync resultado para {name}: uploaded={uploaded} failed={failed} info={msg}")
+                        info['last_sync'] = now_dt
+
+###
             time.sleep(CHECK_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         logging.info("Encerrando por solicitação do usuário (KeyboardInterrupt).")
