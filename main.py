@@ -14,6 +14,11 @@ import crendential_manager
 
 # importa o módulo de upload (arquivo ftp_transfer.py ao lado)
 import ftp_transfer
+import winSingleton
+
+
+# Garantir instância única
+winSingleton.ensureSingleton()
 
 # ---------- CONFIG ----------
 BACKUP_ROOT = r"C:\Backups"
