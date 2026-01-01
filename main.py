@@ -21,16 +21,22 @@ LOG_FILE = os.path.join(BACKUP_ROOT, "backup_script.log")
 CHECK_INTERVAL_SECONDS = 30  # checa horários a cada 30 segundos
 # ----------------------------
 
-# Setup logging
+# Setup logging (força reconfiguração para evitar problemas com imports)
 os.makedirs(BACKUP_ROOT, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
+    ],
+    force=True
 )
+
+logging.info("Logger inicializado")
+logging.info("Base dir exe: %s", os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__)))
+logging.info("CWD: %s", os.getcwd())
+logging.info("Args: %s", sys.argv)
+
 
 def load_config(ini_path):
     config = configparser.ConfigParser()
@@ -38,6 +44,7 @@ def load_config(ini_path):
     if not read:
         raise FileNotFoundError(f"Arquivo INI não encontrado ou vazio: {ini_path}")
     return config
+
 
 def find_gbak(gbak_path_from_ini):
     if gbak_path_from_ini:
@@ -48,10 +55,79 @@ def find_gbak(gbak_path_from_ini):
     else:
         return "gbak"  # assume que está no PATH
 
+
 def ensure_backup_folder(db_name):
     path = os.path.join(BACKUP_ROOT, db_name)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _mask_command_for_log(cmd):
+    """
+    Gera versão do comando com senha mascarada para log.
+    Assume que '-password' é seguido do valor da senha.
+    """
+    masked = []
+    skip_next = False
+    for i, part in enumerate(cmd):
+        if skip_next:
+            masked.append("****")
+            skip_next = False
+            continue
+        if isinstance(part, str) and part.lower() in ("-password", "--password"):
+            masked.append(part)
+            skip_next = True
+            continue
+        masked.append(part)
+    return masked
+
+
+def _run_command_hidden(cmd, timeout=None, cwd=None):
+    """
+    Executa cmd (lista) sem mostrar janela no Windows.
+    Retorna (success: bool, stdout: str, returncode: int or None, err_str: str or None)
+    """
+    creationflags = 0
+    startupinfo = None
+    if os.name == "nt":
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        except Exception:
+            creationflags = 0
+            startupinfo = None
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
+            cwd=cwd,
+            shell=False
+        )
+        return (result.returncode == 0, result.stdout, result.returncode, None)
+    except subprocess.TimeoutExpired as te:
+        logging.error("Comando timeout: %s", te)
+        return (False, str(te), None, str(te))
+    except Exception as e:
+        logging.exception("Erro executando comando: %s", e)
+        return (False, "", None, str(e))
+
+
+def _creation_flags_no_window():
+    """
+    Retorna argumentos compatíveis para evitar abrir janela de console em Windows.
+    Em outras plataformas retorna 0.
+    """
+    if os.name == "nt":
+        return subprocess.CREATE_NO_WINDOW
+    return 0
+
 
 def run_gbak_backup(gbak, user, password, source, dest_backup_path, timeout=None):
     cmd = [gbak, "-b", "-v"]
@@ -60,17 +136,20 @@ def run_gbak_backup(gbak, user, password, source, dest_backup_path, timeout=None
     if password:
         cmd += ["-password", password]
     cmd += [source, dest_backup_path]
-    logging.info(f"Iniciando backup: {' '.join(cmd)}")
+
+    # Logar comando sem revelar senha
     try:
-        if timeout:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-        else:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    except subprocess.TimeoutExpired as te:
-        logging.error(f"gbak timeout: {te}")
-        return False, str(te)
-    logging.info(result.stdout)
-    return result.returncode == 0, result.stdout
+        masked = _mask_command_for_log(cmd)
+        logging.info("Iniciando backup: %s", " ".join(masked))
+    except Exception:
+        logging.info("Iniciando backup (comando oculto por segurança)")
+
+    success, stdout, returncode, err = _run_command_hidden(cmd, timeout=timeout, cwd=None)
+    if err:
+        logging.error("Erro ao executar gbak: %s", err)
+    logging.info(stdout or "")
+    return success, stdout or ""
+
 
 def verify_backup_by_restore(gbak, user, password, backup_file, restore_db_path, timeout=None):
     cmd = [gbak, "-c", "-v"]
@@ -79,18 +158,20 @@ def verify_backup_by_restore(gbak, user, password, backup_file, restore_db_path,
     if password:
         cmd += ["-password", password]
     cmd += [backup_file, restore_db_path]
-    logging.info(f"Verificando backup (tentando restaurar): {' '.join(cmd)}")
+
+    # Logar comando sem revelar senha
     try:
-        if timeout:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-        else:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    except subprocess.TimeoutExpired as te:
-        logging.error(f"gbak (restore) timeout: {te}")
-        return False, str(te)
-    logging.info(result.stdout)
-    success = result.returncode == 0
-    return success, result.stdout
+        masked = _mask_command_for_log(cmd)
+        logging.info("Verificando backup (tentando restaurar): %s", " ".join(masked))
+    except Exception:
+        logging.info("Verificando backup (comando oculto por segurança)")
+
+    success, stdout, returncode, err = _run_command_hidden(cmd, timeout=timeout, cwd=None)
+    if err:
+        logging.error("Erro ao executar gbak (restore): %s", err)
+    logging.info(stdout or "")
+    return success, stdout or ""
+
 
 def zip_file(file_path, zip_path):
     """
@@ -100,11 +181,12 @@ def zip_file(file_path, zip_path):
     try:
         with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.write(file_path, arcname=os.path.basename(file_path))
-        logging.info(f"Arquivo zipado: {zip_path}")
+        logging.info("Arquivo zipado: %s", zip_path)
         return True
     except Exception as e:
-        logging.error(f"Falha ao zipar {file_path} -> {zip_path}: {e}")
+        logging.error("Falha ao zipar %s -> %s: %s", file_path, zip_path, e)
         return False
+
 
 def remove_old_backups_zip(backup_folder, prefix, max_keep):
     """
@@ -120,12 +202,14 @@ def remove_old_backups_zip(backup_folder, prefix, max_keep):
         oldest = files.pop(0)[1]
         try:
             os.remove(oldest)
-            logging.info(f"Removido zip antigo: {oldest}")
+            logging.info("Removido zip antigo: %s", oldest)
         except Exception as e:
-            logging.error(f"Erro removendo {oldest}: {e}")
+            logging.error("Erro removendo %s: %s", oldest, e)
+
 
 def make_timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
 
 def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=None, ftp_config=None):
     """
@@ -147,10 +231,10 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
     start = datetime.now()
     ok, out = run_gbak_backup(gbak, user, password, source, fbk_path, timeout=gbak_timeout)
     duration = (datetime.now() - start).total_seconds()
-    logging.info(f"Duração do gbak (backup) para {name}: {duration:.1f}s")
+    logging.info("Duração do gbak (backup) para %s: %.1f s", name, duration)
 
     if not ok:
-        logging.error(f"Falha no gbak ao gerar backup para {name}. Arquivo possivelmente criado está inválido.")
+        logging.error("Falha no gbak ao gerar backup para %s. Arquivo possivelmente criado está inválido.", name)
         if os.path.exists(fbk_path):
             try:
                 os.remove(fbk_path)
@@ -165,20 +249,20 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
     start_v = datetime.now()
     ver_ok, ver_out = verify_backup_by_restore(gbak, user, password, fbk_path, fdb_path, timeout=verify_timeout)
     duration_v = (datetime.now() - start_v).total_seconds()
-    logging.info(f"Duração da verificação (restore) para {name}: {duration_v:.1f}s")
+    logging.info("Duração da verificação (restore) para %s: %.1f s", name, duration_v)
 
     if not ver_ok:
-        logging.error(f"Verificação falhou para backup {fbk_path}. Removendo arquivos inválidos (se existirem).")
+        logging.error("Verificação falhou para backup %s. Removendo arquivos inválidos (se existirem).", fbk_path)
         try:
             if os.path.exists(fbk_path):
                 os.remove(fbk_path)
         except Exception as e:
-            logging.warning(f"Não foi possível remover {fbk_path}: {e}")
+            logging.warning("Não foi possível remover %s: %s", fbk_path, e)
         try:
             if os.path.exists(fdb_path):
                 os.remove(fdb_path)
         except Exception as e:
-            logging.warning(f"Não foi possível remover {fdb_path}: {e}")
+            logging.warning("Não foi possível remover %s: %s", fdb_path, e)
         return False
 
     # Se ver_ok: zipar o fdb com o mesmo nome base e manter apenas o zip
@@ -187,7 +271,7 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
 
     zipped = zip_file(fdb_path, zip_path)
     if not zipped:
-        logging.error(f"Falha ao criar zip para {fdb_path}. Não removerei arquivos automaticamente para investigação.")
+        logging.error("Falha ao criar zip para %s. Não removerei arquivos automaticamente para investigação.", fdb_path)
         return False
 
     # remover .fbk e .fdb (ficará apenas o zip)
@@ -195,17 +279,17 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
         if os.path.exists(fbk_path):
             os.remove(fbk_path)
     except Exception as e:
-        logging.warning(f"Não foi possível remover {fbk_path}: {e}")
+        logging.warning("Não foi possível remover %s: %s", fbk_path, e)
     try:
         if os.path.exists(fdb_path):
             os.remove(fdb_path)
     except Exception as e:
-        logging.warning(f"Não foi possível remover {fdb_path}: {e}")
+        logging.warning("Não foi possível remover %s: %s", fdb_path, e)
 
-    logging.info(f"Backup finalizado e armazenado como zip: {zip_path}")
+    logging.info("Backup finalizado e armazenado como zip: %s", zip_path)
 
     # Se FTP configurado, tentar enviar
-    logging.info(f"Ftp está confiurado: {ftp_config and ftp_config.get("host")}")
+    logging.info("Ftp está configurado: %s", ftp_config.get("host") if ftp_config else None)
     if ftp_config and ftp_config.get("host"):
         try:
             # monta diretório remoto específico para o banco: <remote_root>/<nome_do_banco>
@@ -221,8 +305,9 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
                 # se remote_root começar com '/', preserva (para caminho absoluto)
                 remote_dir_bank = f"{remote_root}/{bank_name_safe}"
 
-            logging.info(f"Preparando upload FTP para diretório remoto: {remote_dir_bank}")
-                        # primeiro: garantir retenção remota (apagar mais antigos se necessário) para abrir espaço
+            logging.info("Preparando upload FTP para diretório remoto: %s", remote_dir_bank)
+
+            # primeiro: garantir retenção remota (apagar mais antigos se necessário) para abrir espaço
             try:
                 ok_ret, ret_res = ftp_transfer.enforce_remote_retention(
                     host=ftp_config.get("host"),
@@ -238,13 +323,13 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
                 )
                 if ok_ret:
                     if ret_res:
-                        logging.info(f"Retenção remota aplicada. Arquivos deletados: {ret_res}")
+                        logging.info("Retenção remota aplicada. Arquivos deletados: %s", ret_res)
                     else:
                         logging.info("Retenção remota verificada: nenhuma ação necessária.")
                 else:
-                    logging.warning(f"Não foi possível aplicar retenção remota antes do upload: {ret_res} (seguirá com upload)")
+                    logging.warning("Não foi possível aplicar retenção remota antes do upload: %s (seguirá com upload)", ret_res)
             except Exception as e:
-                logging.exception(f"Exceção ao aplicar retenção remota: {e} (seguirá com upload)")
+                logging.exception("Exceção ao aplicar retenção remota: %s", e)
 
             ok_upload, msg = ftp_transfer.upload_file_to_ftp(
                 local_path=zip_path,
@@ -258,23 +343,24 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
                 passive=bool(ftp_config.get("passive", True))
             )
             if ok_upload:
-                logging.info(f"Upload FTP bem-sucedido: {msg} -> remote_dir={remote_dir_bank}")
+                logging.info("Upload FTP bem-sucedido: %s -> remote_dir=%s", msg, remote_dir_bank)
                 # opcional: remover zip local após upload (descomente se quiser)
                 # try:
                 #     os.remove(zip_path)
-                #     logging.info(f"Zip local removido após upload: {zip_path}")
+                #     logging.info("Zip local removido após upload: %s", zip_path)
                 # except Exception as e:
-                #     logging.warning(f"Falha ao remover zip local: {e}")
+                #     logging.warning("Falha ao remover zip local: %s", e)
             else:
-                logging.error(f"Falha no upload FTP: {msg} -> attempted remote_dir={remote_dir_bank}")
+                logging.error("Falha no upload FTP: %s -> attempted remote_dir=%s", msg, remote_dir_bank)
         except Exception as e:
-            logging.exception(f"Exceção ao tentar enviar por FTP: {e}")
+            logging.exception("Exceção ao tentar enviar por FTP: %s", e)
 
     # aplicar política de retenção sobre zips
     prefix_for_keep = f"{name}_"
     remove_old_backups_zip(backup_folder, prefix_for_keep, max_backups)
 
     return True
+
 
 def parse_times(times_value):
     parts = [p.strip() for p in times_value.split(",") if p.strip()]
@@ -284,8 +370,9 @@ def parse_times(times_value):
             datetime.strptime(p, "%H:%M")
             normalized.append(p)
         except ValueError:
-            logging.warning(f"Formato de horário inválido ignorado: {p}")
+            logging.warning("Formato de horário inválido ignorado: %s", p)
     return normalized
+
 
 def backup_exists_on_or_after(backup_folder, name, scheduled, today):
     """
@@ -334,6 +421,7 @@ def backup_exists_on_or_after(backup_folder, name, scheduled, today):
     chosen = candidates[0][1]
     return True, os.path.join(backup_folder, chosen)
 
+
 def main(ini_path):
     config = load_config(ini_path)
     gbak_path_ini = config["DEFAULT"].get("gbak_path", "").strip()
@@ -353,7 +441,6 @@ def main(ini_path):
             "secure": config["DEFAULT"].getboolean("ftp_secure", False),
             "timeout": int(config["DEFAULT"].get("ftp_timeout", "30")),
             "passive": config["DEFAULT"].getboolean("ftp_passive", True),
-            
         }
 
     dbs = []
@@ -362,7 +449,7 @@ def main(ini_path):
         cfg['name'] = config[section].get("name", section).strip()
         cfg['source'] = config[section].get("source")
         if not cfg['source']:
-            logging.warning(f"Seção {section} não tem 'source' definido. Ignorando.")
+            logging.warning("Seção %s não tem 'source' definido. Ignorando.", section)
             continue
         cfg['user'] = config[section].get("user", config["DEFAULT"].get("user", "")).strip()
         cfg['password'] = config[section].get("password", config["DEFAULT"].get("password", "")).strip()
@@ -370,7 +457,7 @@ def main(ini_path):
         times_str = config[section].get("times", "")
         cfg['times'] = parse_times(times_str)
         if not cfg['times']:
-            logging.warning(f"Nenhum horário válido encontrado para {cfg['name']} (seção {section}). Ignorando.")
+            logging.warning("Nenhum horário válido encontrado para %s (seção %s). Ignorando.", cfg['name'], section)
             continue
         dbs.append(cfg)
 
@@ -391,7 +478,7 @@ def main(ini_path):
 
     logging.info("Agendador iniciado. Entradas:")
     for name, info in db_control.items():
-        logging.info(f" - {name} | source={info['cfg']['source']} | times={','.join(info['cfg']['times'])} | folder={info['folder']}")
+        logging.info(" - %s | source=%s | times=%s | folder=%s", name, info['cfg']['source'], ",".join(info['cfg']['times']), info['folder'])
 
     try:
         while True:
@@ -424,20 +511,20 @@ def main(ini_path):
                             today
                         )
                         if exists:
-                            logging.info(f"Backup encontrado (>= agendamento) para {name} agendado em {scheduled}: {os.path.basename(existing_path)} — marcando como executado e pulando.")
+                            logging.info("Backup encontrado (>= agendamento) para %s agendado em %s: %s — marcando como executado e pulando.", name, scheduled, os.path.basename(existing_path))
                             info['last_run'][scheduled] = today
                             continue
 
-                        logging.info(f"Hora de rodar backup para {name} agendado em {scheduled} (agora é {now.strftime('%H:%M:%S')})")
-                        success = backup_now(gbak, cfg, info['folder'], ftp_config=ftp_config)
+                        logging.info("Hora de rodar backup para %s agendado em %s (agora é %s)", name, scheduled, now.strftime('%H:%M:%S'))
+                        success = backup_now(gbak, cfg, info['folder'], gbak_timeout=None, verify_timeout=None, ftp_config=ftp_config)
                         if success:
                             info['last_run'][scheduled] = today
                         else:
-                            logging.warning(f"Backup para {name} em {scheduled} falhou. Não marcar como executado; tentará novamente se aplicável.")
+                            logging.warning("Backup para %s em %s falhou. Não marcar como executado; tentará novamente se aplicável.", name, scheduled)
 
-                # ler interval do config (só uma vez no load); suponha ftp_sync_interval_minutes int
+                # ftp sync interval (usar ftp_sync_interval_minutes lido do INI)
                 interval = timedelta(minutes=ftp_sync_interval_minutes)
-    
+
                 now_dt = datetime.now()
                 last = info.get("last_sync")
                 if ftp_config and ftp_config.get("host"):
@@ -447,19 +534,22 @@ def main(ini_path):
                     else:
                         if (now_dt - last) >= interval:
                             do_sync = True
-    
+
                     if do_sync:
-                        logging.info(f"Iniciando sync FTP para {name} (local->{ftp_config.get('remote_dir')}/{name})")
-                        uploaded, failed, msg = sync_local_zips_to_ftp(info['folder'], name, ftp_config)
-                        logging.info(f"Sync resultado para {name}: uploaded={uploaded} failed={failed} info={msg}")
+                        logging.info("Iniciando sync FTP para %s (local->%s/%s)", name, ftp_config.get("remote_dir"), name)
+                        try:
+                            uploaded, failed, msg = sync_local_zips_to_ftp(info['folder'], name, ftp_config)
+                            logging.info("Sync resultado para %s: uploaded=%s failed=%s info=%s", name, uploaded, failed, msg)
+                        except Exception as e:
+                            logging.exception("Erro no sync_local_zips_to_ftp: %s", e)
                         info['last_sync'] = now_dt
 
-###
             time.sleep(CHECK_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         logging.info("Encerrando por solicitação do usuário (KeyboardInterrupt).")
     except Exception as e:
-        logging.exception(f"Erro crítico no agendador: {e}")
+        logging.exception("Erro crítico no agendador: %s", e)
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
