@@ -10,6 +10,7 @@ from datetime import datetime, date, timedelta
 import logging
 import zipfile
 from utils import sync_local_zips_to_ftp
+import crendential_manager
 
 # importa o módulo de upload (arquivo ftp_transfer.py ao lado)
 import ftp_transfer
@@ -204,6 +205,7 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
     logging.info(f"Backup finalizado e armazenado como zip: {zip_path}")
 
     # Se FTP configurado, tentar enviar
+    logging.info(f"Ftp está confiurado: {ftp_config and ftp_config.get("host")}")
     if ftp_config and ftp_config.get("host"):
         try:
             # monta diretório remoto específico para o banco: <remote_root>/<nome_do_banco>
@@ -338,15 +340,15 @@ def main(ini_path):
     gbak = find_gbak(gbak_path_ini)
 
     # Carregar configuração FTP (opcional). Se host vazio => não faz upload.
-    ftp_host = config["DEFAULT"].get("ftp_server", "").strip()
+    ftp_host = crendential_manager.get_decrypted_credential_manager().get("ftp_server", "").strip()
     ftp_config = None
     ftp_sync_interval_minutes = int(config["DEFAULT"].get("ftp_sync_interval_minutes", "60"))
     if ftp_host:
         ftp_config = {
             "host": ftp_host,
             "port": int(config["DEFAULT"].get("ftp_port", "21")),
-            "user": config["DEFAULT"].get("ftp_user", ""),
-            "password": config["DEFAULT"].get("ftp_password", ""),
+            "user": crendential_manager.get_decrypted_credential_manager().get("ftp_user", "").strip(),
+            "password": crendential_manager.get_decrypted_credential_manager().get("ftp_password", ""),
             "remote_dir": config["DEFAULT"].get("ftp_remote_dir", "."),
             "secure": config["DEFAULT"].getboolean("ftp_secure", False),
             "timeout": int(config["DEFAULT"].get("ftp_timeout", "30")),
