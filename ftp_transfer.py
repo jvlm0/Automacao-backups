@@ -8,6 +8,7 @@ import os
 import ftplib
 import logging
 from typing import Tuple
+from datetime import datetime
 
 # usa o logger root (herda configuração do seu main)
 logger = logging.getLogger(__name__)
@@ -251,3 +252,149 @@ def list_remote_files(host: str,
         except Exception:
             pass
         return False, f"Erro inesperado ao listar remoto: {e}"
+
+
+def delete_remote_file(host: str,
+                       username: str,
+                       password: str,
+                       remote_dir: str,
+                       filename: str,
+                       port: int = 21,
+                       secure: bool = False,
+                       timeout: int = 30,
+                       passive: bool = True):
+    """
+    Deleta 'filename' dentro de 'remote_dir' no servidor FTP. Retorna (True,msg) ou (False,msg).
+    """
+    try:
+        if secure:
+            ftp = ftplib.FTP_TLS(timeout=timeout)
+        else:
+            ftp = ftplib.FTP(timeout=timeout)
+        ftp.connect(host, port, timeout=timeout)
+        ftp.login(username, password)
+        ftp.set_pasv(passive)
+        if secure and isinstance(ftp, ftplib.FTP_TLS):
+            try:
+                ftp.prot_p()
+            except Exception:
+                pass
+
+        # entrar no diretório (não criar)
+        rd = (remote_dir or ".").replace("\\", "/")
+        try:
+            ftp.cwd(rd)
+        except Exception as e:
+            try:
+                ftp.quit()
+            except Exception:
+                pass
+            return False, f"Não foi possível entrar no diretório remoto '{remote_dir}' para deletar: {e}"
+
+        try:
+            ftp.delete(filename)
+        except ftplib.all_errors as e:
+            try:
+                ftp.quit()
+            except Exception:
+                pass
+            return False, f"Erro ao deletar remoto '{filename}': {e}"
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+        return True, f"Deletado: {filename} em {remote_dir}"
+    except ftplib.all_errors as e:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+        return False, f"Erro FTP ao deletar '{filename}': {e}"
+    except Exception as e:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+        return False, f"Erro inesperado ao deletar '{filename}': {e}"
+
+
+def enforce_remote_retention(host: str,
+                             username: str,
+                             password: str,
+                             remote_dir: str,
+                             db_name: str,
+                             max_keep: int,
+                             port: int = 21,
+                             secure: bool = False,
+                             timeout: int = 30,
+                             passive: bool = True):
+    """
+    Garante que no remote_dir (pasta do banco) existam no máximo 'max_keep' arquivos do padrão
+    <db_name>_YYYYMMDD_HHMMSS.zip (ou HHMM). Se houver mais, deleta os mais antigos primeiro.
+    Retorna (True, deleted_list) em sucesso, ou (False, mensagem) em falha.
+    """
+    try:
+        # listar arquivos remotos (reaproveita list_remote_files)
+        ok, result = list_remote_files(host=host, username=username, password=password,
+                                       remote_dir=remote_dir, port=port, secure=secure,
+                                       timeout=timeout, passive=passive)
+        if not ok:
+            return False, f"Falha ao listar remoto {remote_dir}: {result}"
+
+        remote_files = result  # set de nomes
+        # selecionar apenas os zips com prefixo db_name_
+        candidates = []
+        prefix = f"{db_name}_"
+        for fn in remote_files:
+            if not fn.lower().endswith(".zip"):
+                continue
+            if not fn.startswith(prefix):
+                continue
+            base = os.path.splitext(fn)[0]
+            parts = base.rsplit("_", 2)
+            if len(parts) < 3:
+                continue
+            name_part, date_part, time_part = parts
+            if name_part != db_name:
+                continue
+            # tentar parsear data+hora
+            try:
+                if len(time_part) == 6 and len(date_part) == 8:
+                    dt = datetime.strptime(date_part + time_part, "%Y%m%d%H%M%S")
+                elif len(time_part) == 4 and len(date_part) == 8:
+                    dt = datetime.strptime(date_part + time_part + "00", "%Y%m%d%H%M%S")
+                else:
+                    # formato inesperado, usar epoch 0 para empurrar para o início (ou pular)
+                    continue
+                candidates.append((dt, fn))
+            except Exception:
+                # pular arquivos que não casam o padrão
+                continue
+
+        # ordenar do mais antigo para o mais novo
+        candidates.sort(key=lambda x: x[0])
+
+        current_count = len(candidates)
+        logging.info(f"enforce_remote_retention: {current_count} arquivos encontrados para '{db_name}' em '{remote_dir}'. max_keep={max_keep}")
+        if current_count <= max_keep:
+            return True, []  # nada a fazer
+
+        # quantos deletar
+        to_delete_count = current_count - max_keep + 1
+        deleted = []
+        for i in range(to_delete_count):
+            fname = candidates[i][1]
+            # deletar via delete_remote_file
+            ok_del, msg_del = delete_remote_file(host=host, username=username, password=password,
+                                                 remote_dir=remote_dir, filename=fname,
+                                                 port=port, secure=secure, timeout=timeout, passive=passive)
+            if ok_del:
+                deleted.append(fname)
+            else:
+                # se não conseguiu deletar, retornar erro (parcial ou total)
+                return False, f"Falha ao deletar antigo '{fname}': {msg_del}"
+
+        return True, deleted
+
+    except Exception as e:
+        return False, f"Erro inesperado em enforce_remote_retention: {e}"

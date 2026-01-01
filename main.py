@@ -220,6 +220,29 @@ def backup_now(gbak, db_cfg, backup_folder, gbak_timeout=None, verify_timeout=No
                 remote_dir_bank = f"{remote_root}/{bank_name_safe}"
 
             logging.info(f"Preparando upload FTP para diretório remoto: {remote_dir_bank}")
+                        # primeiro: garantir retenção remota (apagar mais antigos se necessário) para abrir espaço
+            try:
+                ok_ret, ret_res = ftp_transfer.enforce_remote_retention(
+                    host=ftp_config.get("host"),
+                    username=ftp_config.get("user"),
+                    password=ftp_config.get("password"),
+                    remote_dir=remote_dir_bank,
+                    db_name=name,
+                    max_keep=max_backups,
+                    port=int(ftp_config.get("port", 21)),
+                    secure=bool(ftp_config.get("secure", False)),
+                    timeout=int(ftp_config.get("timeout", 30)),
+                    passive=bool(ftp_config.get("passive", True))
+                )
+                if ok_ret:
+                    if ret_res:
+                        logging.info(f"Retenção remota aplicada. Arquivos deletados: {ret_res}")
+                    else:
+                        logging.info("Retenção remota verificada: nenhuma ação necessária.")
+                else:
+                    logging.warning(f"Não foi possível aplicar retenção remota antes do upload: {ret_res} (seguirá com upload)")
+            except Exception as e:
+                logging.exception(f"Exceção ao aplicar retenção remota: {e} (seguirá com upload)")
 
             ok_upload, msg = ftp_transfer.upload_file_to_ftp(
                 local_path=zip_path,
