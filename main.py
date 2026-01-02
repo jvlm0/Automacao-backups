@@ -427,6 +427,29 @@ def backup_exists_on_or_after(backup_folder, name, scheduled, today):
     return True, os.path.join(backup_folder, chosen)
 
 
+MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB
+LOG_CHECK_INTERVAL = 3600
+_last_log_check = 0
+def truncate_log_if_needed():
+    global _last_log_check
+
+    now = time.time()
+
+    # só checa 1x por hora
+    if now - _last_log_check < LOG_CHECK_INTERVAL:
+        return
+
+    _last_log_check = now
+
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > MAX_LOG_SIZE:
+            open(LOG_FILE, "w", encoding="utf-8").close()
+            logging.info("Log truncado automaticamente (tamanho máximo atingido).")
+    except Exception:
+        # nunca deixar erro de log derrubar o app
+        pass
+
+
 def main(ini_path):
     config = load_config(ini_path)
     gbak_path_ini = config["DEFAULT"].get("gbak_path", "").strip()
@@ -489,7 +512,7 @@ def main(ini_path):
         while True:
             now = datetime.now()
             today = date.today()
-
+            truncate_log_if_needed()
             # Para cada banco, verificamos TODOS os horários agendados.
             for name, info in db_control.items():
                 cfg = info['cfg']
