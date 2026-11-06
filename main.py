@@ -456,15 +456,16 @@ def main(ini_path):
     gbak = find_gbak(gbak_path_ini)
 
     # Carregar configuração FTP (opcional). Se host vazio => não faz upload.
-    ftp_host = crendential_manager.get_decrypted_credential_manager().get("ftp_server", "").strip()
+    ftp_creds = crendential_manager.get_ftp_credentials()
+    ftp_host = ftp_creds["ftp_server"]
     ftp_config = None
     ftp_sync_interval_minutes = int(config["DEFAULT"].get("ftp_sync_interval_minutes", "60"))
     if ftp_host:
         ftp_config = {
             "host": ftp_host,
             "port": int(config["DEFAULT"].get("ftp_port", "21")),
-            "user": crendential_manager.get_decrypted_credential_manager().get("ftp_user", "").strip(),
-            "password": crendential_manager.get_decrypted_credential_manager().get("ftp_password", ""),
+            "user": ftp_creds["ftp_user"],
+            "password": ftp_creds["ftp_password"],
             "remote_dir": config["DEFAULT"].get("ftp_remote_dir", "."),
             "secure": config["DEFAULT"].getboolean("ftp_secure", False),
             "timeout": int(config["DEFAULT"].get("ftp_timeout", "30")),

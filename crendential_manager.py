@@ -1,50 +1,25 @@
-import json
+"""
+Credenciais do FTP.
+
+Lidas de variáveis de ambiente para não ficarem no código-fonte nem no executável:
+
+    NORTUS_FTP_SERVER    host do servidor FTP (vazio = upload desativado)
+    NORTUS_FTP_USER      usuário
+    NORTUS_FTP_PASSWORD  senha
+
+No Windows, defina-as para o sistema (vale para o Agendador de Tarefas) com:
+
+    setx /M NORTUS_FTP_SERVER   "ftp.exemplo.com"
+    setx /M NORTUS_FTP_USER     "usuario"
+    setx /M NORTUS_FTP_PASSWORD "senha"
+"""
 import os
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-from cryptography.hazmat.backends import default_backend
-import base64
 
 
-
-encrypted = {'salt': 'REMOVIDO', 
-                       'nonce': 'REMOVIDO', 
-                       'ciphertext': 'REMOVIDO'} 
-
-
-
-def derive_key(password: str, salt: bytes) -> bytes:
-    kdf = Scrypt(
-        salt=salt,
-        length=32,          # 32 bytes = 256 bits
-        n=2**14,
-        r=8,
-        p=1,
-        backend=default_backend()
-    )
-    return kdf.derive(password.encode())
-
-def decrypt_dict(encrypted_data: dict, password: str) -> dict:
-    salt = base64.b64decode(encrypted_data["salt"])
-    nonce = base64.b64decode(encrypted_data["nonce"])
-    ciphertext = base64.b64decode(encrypted_data["ciphertext"])
-
-    key = derive_key(password, salt)
-    aesgcm = AESGCM(key)
-
-    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-
-    return json.loads(plaintext.decode())
-
-master_password = "SENHA_MESTRE_REMOVIDA"
-
-
-def get_decrypted_credential_manager() -> dict:
-    """
-    Descriptografa o dicionário de credenciais criptografadas usando a senha mestre fornecida.
-    
-    :param encrypted_cred_manager: Dicionário contendo as credenciais criptografadas.
-    :param master_password: Senha mestre para descriptografia.
-    :return: Dicionário com as credenciais descriptografadas.
-    """
-    return decrypt_dict(encrypted, master_password)
+def get_ftp_credentials() -> dict:
+    """Retorna {'ftp_server', 'ftp_user', 'ftp_password'} a partir do ambiente."""
+    return {
+        "ftp_server": os.environ.get("NORTUS_FTP_SERVER", "").strip(),
+        "ftp_user": os.environ.get("NORTUS_FTP_USER", "").strip(),
+        "ftp_password": os.environ.get("NORTUS_FTP_PASSWORD", ""),
+    }
